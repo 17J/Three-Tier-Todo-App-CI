@@ -1,0 +1,9 @@
+com\taskmanager\dto\TaskDTO.class
+com\taskmanager\repository\TaskRepository.class
+com\taskmanager\model\Task$Category.class
+com\taskmanager\service\TaskService.class
+com\taskmanager\model\Task$Status.class
+com\taskmanager\model\Task.class
+com\taskmanager\controller\TaskController.class
+com\taskmanager\model\Task$Priority.class
+com\taskmanager\TaskManagerApplication.class
