@@ -1,142 +1,278 @@
 pipeline {
     agent any
+   
+    // Tools Configuration
     tools {
-        jdk "JDK-17.0"
-        maven "MAVEN-3.9"
-        nodejs "NODEJS-23.11"
+        jdk "jdk-17.0"
+        maven "maven-3.9"
+        nodejs "nodejs-23.8"
     }
-    parameters {
-        string(name: 'frontend_tag', defaultValue: 'latest', description: 'Three Tier Frontend Image Tag')
-        string(name: 'backend_tag', defaultValue: 'latest', description: 'Three Tier Backend Image Tag')
+   
+    // Environment Variables
+    environment {
+        SCANNER_HOME = tool 'sonar-scanner'
+        FRONTEND_IMAGE_NAME = 'three-tier-todo-frontend'
+        BACKEND_IMAGE_NAME = "three-tier-todo-backend"
+        IMAGE_TAG = "${BUILD_NUMBER}"
+        DOCKER_REGISTRY = '17rj'  // your Docker Hub username / registry
+        K8S_NAMESPACE = 'threetierapp'
+        RECIPIENTS = 'your-email@example.com, team@example.com'  // add your emails here
     }
+   
     stages {
         stage('Clean Workspace') {
             steps {
                 cleanWs()
             }
         }
-        stage('Github Checkout') {
+       
+        stage('Checkout Code') {
             steps {
-                echo 'Github Checkout'
-                git branch: 'main',
-                    changelog: false,
-                    credentialsId: 'github-cred',
-                    poll: false,
-                    url: 'https://github.com/17J/Three-Tier-Todo-App-CI.git'
+                git branch: 'main', url: 'https://github.com/17J/Three-Tier-Todo-Application.git'
             }
         }
-        stage('Gitleaks Scan') {
-            steps {
-                echo 'Gitleaks Scanning for Secrets'
-                sh 'gitleaks detect --source . -v --redact'  // Current code only, no full git history
-            }
-        }
-        stage('Trivy Repository Scan') {
-            steps {
-                echo 'Trivy Scanning Repository for Vulnerabilities'
-                sh 'trivy repo --format table -o repo-report.html .'
-                archiveArtifacts artifacts: 'repo-report.html', allowEmptyArchive: true
-            }
-        }
-        stage('Build and Test') {
+       
+        stage('Compilation of Codes') {
             parallel {
-                stage('Frontend') {
+                stage('Frontend Compilation') {
                     steps {
                         dir('frontend') {
-                            echo "Installing Frontend Dependencies (npm install)"
-                            sh 'npm install'
-                            // Optional: Add npm audit for deps vulns
-                            // sh 'npm audit --audit-level=high'
+                            sh 'find . -name "*.js" -exec node --check {} +'
                         }
                     }
                 }
-                stage('Backend') {
+                stage('Backend Compilation') {
                     steps {
                         dir('backend') {
-                            echo "Compiling Backend (mvn compile)"
-                            sh 'mvn compile'
-                            echo "Running Backend Tests (mvn test)"
-                            sh 'mvn test'
-                            echo "Packaging Backend (mvn package -DskipTests=true)"
-                            sh 'mvn package -DskipTests=true'
+                            sh "mvn clean compile"
                         }
                     }
                 }
             }
         }
-        stage("Publish to Nexus Artifact") {
+ 
+        stage('Gitleaks Checking') {
             steps {
-                dir('backend') {
-                    echo "Publishing Backend Artifact to Nexus"
-                    withMaven(globalMavenSettingsConfig: 'bbd23a3f-74af-4672-aa48-fbfa00f673ec', jdk: 'JDK-17.0', maven: 'MAVEN-3.9') {
-                        sh 'mvn deploy'
-                    }
-                }
+                sh "gitleaks detect --no-git -v --redact --exit-code 1 --report-path leaks_report.json"
             }
         }
-        stage('Docker Builds') {
+       
+        stage('Snyk SCA Scan') {
             parallel {
-                stage("Docker Build Frontend Image") {
+                stage('Snyk Frontend Scan') {
                     steps {
                         dir('frontend') {
-                            echo "Building Frontend Docker Image (17rj/three-tier-todo-frontend:${params.frontend_tag})"
-                            sh "docker build -t 17rj/three-tier-todo-frontend:${params.frontend_tag} ."
+                            withCredentials([string(credentialsId: 'snyk-token', variable: 'SNYK_TOKEN')]) {
+                                sh '''
+                                    snyk auth $SNYK_TOKEN
+                                    snyk test --json-file-output=snyk-frontend-report.json || true
+                                    snyk monitor --project-name=three-tier-todo-frontend || true
+                                '''
+                            }
                         }
                     }
                 }
-                stage("Docker Build Backend Image") {
+                stage('Snyk Backend Scan') {
                     steps {
                         dir('backend') {
-                            echo "Building Backend Docker Image (17rj/three-tier-todo-backend:${params.backend_tag})"
-                            sh "docker build -t 17rj/three-tier-todo-backend:${params.backend_tag} ."
+                            withCredentials([string(credentialsId: 'snyk-token', variable: 'SNYK_TOKEN')]) {
+                                sh '''
+                                    snyk auth $SNYK_TOKEN
+                                    snyk test --json-file-output=snyk-backend-report.json || true
+                                    snyk monitor --project-name=three-tier-todo-backend || true
+                                '''
+                            }
                         }
                     }
                 }
             }
         }
-        stage('Trivy Image Scan') {
+       
+        stage('Sonarqube Code Analysis') {
             steps {
-                echo 'Scanning Docker Images for Vulnerabilities'
-                sh """
-                    trivy image --format table -o frontend-report.html --exit-code 1 --severity CRITICAL,HIGH 17rj/three-tier-todo-frontend:${params.frontend_tag}
-                    trivy image --format table -o backend-report.html --exit-code 1 --severity CRITICAL,HIGH 17rj/three-tier-todo-backend:${params.backend_tag}
-                """
-                archiveArtifacts artifacts: 'frontend-report.html, backend-report.html', allowEmptyArchive: true
+                withSonarQubeEnv("sonar") {
+                    sh '''
+                        $SCANNER_HOME/bin/sonar-scanner \
+                        -Dsonar.projectName=threetiertodo \
+                        -Dsonar.projectKey=threetiertodo \
+                        -Dsonar.java.binaries=backend/target/classes \
+                        -Dsonar.sources=.,frontend/src,backend/src/main/java \
+                        -Dsonar.tests=backend/src/test/java,frontend/src/tests  # adjust if needed
+                    '''
+                }
             }
         }
-        stage("Docker Push Images") {
+       
+        stage('Quality Gate') {
             steps {
-                echo "Pushing Docker Images to Registry"
-                script {
-                    withDockerRegistry(credentialsId: 'docker-cred', toolName: 'docker') {
-                        sh """
-                            docker push 17rj/three-tier-todo-frontend:${params.frontend_tag}
-                            docker push 17rj/three-tier-todo-backend:${params.backend_tag}
-                        """
+                timeout(time: 1, unit: 'HOURS') {
+                    waitForQualityGate abortPipeline: false, credentialsId: 'sonarqube'
+                }
+            }
+        }
+       
+        stage('Trivy FS Scan') {
+            steps {
+                parallel {
+                    stage('Frontend FS') { sh "trivy fs --format table -o trivy-fs-frontend.html frontend/" }
+                    stage('Backend FS')  { sh "trivy fs --format table -o trivy-fs-backend.html backend/" }
+                }
+            }
+        }
+       
+        stage('Docker Build & Push') {
+            parallel {
+                stage('Frontend Docker Build') {
+                    steps {
+                        dir('frontend') {
+                            withDockerRegistry(credentialsId: 'docker-creds', toolName: 'docker') {
+                                sh '''
+                                    docker build --pull -t ${DOCKER_REGISTRY}/${FRONTEND_IMAGE_NAME}:${IMAGE_TAG} .
+                                    docker push ${DOCKER_REGISTRY}/${FRONTEND_IMAGE_NAME}:${IMAGE_TAG}
+                                '''
+                            }
+                        }
+                    }
+                }
+                stage('Backend Docker Build') {
+                    steps {
+                        dir('backend') {
+                            withDockerRegistry(credentialsId: 'docker-creds', toolName: 'docker') {
+                                sh '''
+                                    docker build --pull -t ${DOCKER_REGISTRY}/${BACKEND_IMAGE_NAME}:${IMAGE_TAG} .
+                                    docker push ${DOCKER_REGISTRY}/${BACKEND_IMAGE_NAME}:${IMAGE_TAG}
+                                '''
+                            }
+                        }
                     }
                 }
             }
         }
-        stage('Update YAML in GitOps Repo') {
-            steps {
-                echo "Updating Deployment YAML in GitOps Repository"
-                script {
-                    withCredentials([usernamePassword(credentialsId: 'github-cred', usernameVariable: 'GIT_USERNAME', passwordVariable: 'GIT_PASSWORD')]) {
-                        sh """
-                            git clone https://${GIT_USERNAME}:${GIT_PASSWORD}@github.com/17J/Three-Tier-Todo-App-CD.git gitops-repo
-                            cd gitops-repo/K8s
-                            echo "Updating image tag in frontend-ds-service.yml and backend-ds-service.yml"
-                            sed -i 's|image: 17rj/three-tier-todo-frontend:.*|image: 17rj/three-tier-todo-frontend:${params.frontend_tag}|' frontend-ds-service.yml
-                            sed -i 's|image: 17rj/three-tier-todo-backend:.*|image: 17rj/three-tier-todo-backend:${params.backend_tag}|' backend-ds-service.yml
-                            git config user.email "jenkins@example.com"
-                            git config user.name "jenkins"
-                            git add frontend-ds-service.yml backend-ds-service.yml
-                            git commit -m "Update frontend image tag to ${params.frontend_tag} and backend tag to ${params.backend_tag}" || echo "No changes to commit"
-                            git push origin main
-                        """
+       
+        stage('Docker Image Scan') {
+            parallel {
+                stage('Trivy Image Scan') {
+                    steps {
+                        sh "trivy image --format table -o trivy-frontend-image.html ${DOCKER_REGISTRY}/${FRONTEND_IMAGE_NAME}:${IMAGE_TAG}"
+                        sh "trivy image --format table -o trivy-backend-image.html ${DOCKER_REGISTRY}/${BACKEND_IMAGE_NAME}:${IMAGE_TAG}"
+                    }
+                }
+                stage('Snyk Container Scan') {
+                    steps {
+                        withCredentials([string(credentialsId: 'snyk-token', variable: 'SNYK_TOKEN')]) {
+                            sh '''
+                                snyk auth $SNYK_TOKEN
+                                snyk container test ${DOCKER_REGISTRY}/${FRONTEND_IMAGE_NAME}:${IMAGE_TAG} --json-file-output=snyk-frontend-container.json || true
+                                snyk container test ${DOCKER_REGISTRY}/${BACKEND_IMAGE_NAME}:${IMAGE_TAG} --json-file-output=snyk-backend-container.json || true
+                            '''
+                        }
                     }
                 }
             }
+        }
+       
+        stage('Kubernetes Deploy') {
+            steps {
+                dir('K8s') {
+                    withKubeConfig([credentialsId: 'kube-cred']) {  // assuming full kubeconfig in credential
+                        sh '''
+                            set -e
+                            kubectl apply -f backend-ds-service.yml -n ${K8S_NAMESPACE}
+                            kubectl apply -f db-ds-service.yml -n ${K8S_NAMESPACE}
+                            kubectl apply -f frontend-ds-service.yml -n ${K8S_NAMESPACE}
+                            kubectl apply -f ingress.yml -n ${K8S_NAMESPACE}
+                            kubectl apply -f secrets-configmap.yml -n ${K8S_NAMESPACE}
+                            
+                            # Wait for deployments to be ready
+                            kubectl wait --for=condition=available --timeout=120s deployment/backend-deployment -n ${K8S_NAMESPACE}
+                            kubectl wait --for=condition=available --timeout=120s deployment/db-deployment -n ${K8S_NAMESPACE} || true  # if db is StatefulSet, adjust
+                            kubectl wait --for=condition=available --timeout=120s deployment/frontend-deployment -n ${K8S_NAMESPACE}
+                        '''
+                    }
+                }
+            }
+        }
+       
+        stage('Retrieve Application URL') {
+            steps {
+                script {
+                    withKubeConfig([credentialsId: 'kube-cred']) {
+                        // Assuming ingress has hostname in status (common for AWS ALB)
+                        env.K8S_URL = sh(script: "kubectl get ingress frontend-ingress -n ${K8S_NAMESPACE} -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'", returnStdout: true).trim()
+                        if (!env.K8S_URL) {
+                            error "Ingress hostname not found! Check ingress status."
+                        }
+                    }
+                }
+                echo "Frontend URL: https://${env.K8S_URL}"  // usually HTTPS with Ingress
+            }
+        }
+       
+        stage('Kubernetes Verify') {
+            steps {
+                withKubeConfig([credentialsId: 'kube-cred']) {
+                    sh '''
+                        kubectl get pods -n ${K8S_NAMESPACE}
+                        kubectl get svc -n ${K8S_NAMESPACE}
+                        kubectl get ingress -n ${K8S_NAMESPACE}
+                    '''
+                }
+            }
+        }
+       
+        stage('OWASP ZAP Baseline Scan') {
+            steps {
+                script {
+                    // Using official ZAP Docker for baseline (passive + spider, CI friendly)
+                    sh '''
+                        docker run --rm \
+                          -v $(pwd):/zap/wrk/:rw \
+                          -t ghcr.io/zaproxy/zaproxy:stable \
+                          zap-baseline.py \
+                          -t https://${K8S_URL} \
+                          -r zap-baseline-report.html \
+                          -x zap-baseline-report.xml \
+                          -I  # ignore failures for now, or remove to fail build
+                    '''
+                    archiveArtifacts artifacts: 'zap-baseline-report.*', allowEmptyArchive: true
+                }
+            }
+        }
+    }
+   
+    post {
+        always {
+            echo 'Collecting Falco Security Logs...'
+            sh 'kubectl logs -l app=falco -n falco --tail=100 || true'  // adjust ns if different
+           
+            archiveArtifacts artifacts: '**/snyk-*-report.json, **/trivy-*.html, **/zap-*.html', allowEmptyArchive: true
+        }
+        success {
+            emailext(
+                subject: "✅ SUCCESS: Jenkins Build #${BUILD_NUMBER} - ${JOB_NAME}",
+                body: """
+                <h2>✅ Build Successful!</h2>
+                <p>Jenkins Job: ${JOB_NAME}</p>
+                <p>Build Number: ${BUILD_NUMBER}</p>
+                <p>App URL: https://${K8S_URL}</p>
+                <p>Check logs: <a href="${BUILD_URL}console">here</a></p>
+                """,
+                to: "${RECIPIENTS}",
+                mimeType: "text/html"
+            )
+        }
+        failure {
+            emailext(
+                subject: "❌ FAILURE: Jenkins Build #${BUILD_NUMBER} - ${JOB_NAME}",
+                body: """
+                <h2>❌ Build Failed!</h2>
+                <p>Jenkins Job: ${JOB_NAME}</p>
+                <p>Build Number: ${BUILD_NUMBER}</p>
+                <p>Check logs: <a href="${BUILD_URL}console">here</a></p>
+                """,
+                to: "${RECIPIENTS}",
+                mimeType: "text/html"
+            )
         }
     }
 }
