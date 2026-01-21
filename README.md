@@ -688,7 +688,7 @@ curl http://<ALB-URL>
 ### Complete Pipeline Overview
 
 <p align="center">
-    <img src="snapshot/pipelinestagesvide.png" alt="Jenkins Pipeline - 23 Stages" width="900"/>
+    <img src="snapshot\stages_pipeline_flow.png" alt="Jenkins Pipeline - 23 Stages" width="900"/>
 </p>
 
 | #   | Stage Name             | Tool/Action | Purpose                         | Duration |
