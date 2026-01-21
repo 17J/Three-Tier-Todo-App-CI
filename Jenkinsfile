@@ -4,15 +4,14 @@ pipeline {
     tools {
         jdk "jdk-17.0"
         maven "maven-3.9"
-        nodejs "nodejs-23.9"
+        nodejs "nodejs-23.8"
     }
     // Environment Variables for Registry, Images, and SonarQube
     environment {
-        GIT_COMMIT_SHORT = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
         SCANNER_HOME = tool 'sonar-scanner'
         FRONTEND_IMAGE_NAME = 'three-tier-todo-frontend'
         BACKEND_IMAGE_NAME = "three-tier-todo-backend"
-        IMAGE_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT_SHORT}"
+        IMAGE_TAG = "${env.BUILD_NUMBER}"
         DOCKER_REGISTRY = '17rj'
     }
     stages {
@@ -49,7 +48,7 @@ pipeline {
                 }
             }
         }
-        stage('Truffle Hog  Secret Checking') {
+        stage('Truffle Hog Secret Checking') {
             steps {
                 // Scanning the repository for leaked API keys, tokens, or credentials
                 sh '''
@@ -78,7 +77,6 @@ pipeline {
                                     snyk auth $SNYK_TOKEN
                                     snyk test --severity-threshold=high --json-file-output=snyk-frontend.json || true
                                     snyk test --json | snyk-to-html -o snyk-frontend.html || true
-
                                 '''
                             }
                             archiveArtifacts artifacts: 'snyk-frontend.*', allowEmptyArchive: true
@@ -90,11 +88,10 @@ pipeline {
                         dir('backend') {
                             withCredentials([string(credentialsId: 'snyk-cred', variable: 'SNYK_TOKEN')]) {
                                 sh '''
-                                  snyk auth $SNYK_TOKEN 
-                                  snyk test --severity-threshold=high --json-file-output=snyk-backend.json || true
-                                  snyk test --json | snyk-to-html -o snyk-backend.html || true
-
-                                  '''
+                                    snyk auth $SNYK_TOKEN 
+                                    snyk test --severity-threshold=high --json-file-output=snyk-backend.json || true
+                                    snyk test --json | snyk-to-html -o snyk-backend.html || true
+                                '''
                             }
                             archiveArtifacts artifacts: 'snyk-backend.*', allowEmptyArchive: true
                         }
@@ -121,21 +118,19 @@ pipeline {
                     steps {
                         dir('backend') {
                             // Compiling Java source code using Maven
-                            sh " mvn test"
+                            sh "mvn test"
                         }
                     }
-
                     post {
-                         always {
-                              jacoco(
-                                  execPattern: '**/target/*.exec',
-                                  classPattern: '**/target/classes',
-                                  sourcePattern: '**/src/main/java',
-                                  inclusionPattern: '**/*.class'
-                                    )
-                            }
+                        always {
+                            jacoco(
+                                execPattern: '**/target/*.exec',
+                                classPattern: '**/target/classes',
+                                sourcePattern: '**/src/main/java',
+                                inclusionPattern: '**/*.class'
+                            )
                         }
-
+                    }
                 }
             }
         }
@@ -145,8 +140,8 @@ pipeline {
                 withSonarQubeEnv("sonar") {
                     sh '''
                          $SCANNER_HOME/bin/sonar-scanner \
-                         -Dsonar.projectName=devsecopsthreetier \
-                         -Dsonar.projectKey=devsecopsthreetier \
+                         -Dsonar.projectName=gitopsthreetier \
+                         -Dsonar.projectKey=gitopsthreetier \
                          -Dsonar.sources=frontend/src,backend/src \
                          -Dsonar.java.binaries=backend/target/classes \
                          -Dsonar.jacoco.reportPaths=backend/target/jacoco.exec \
@@ -172,12 +167,12 @@ pipeline {
                 }
             }
         }
-        stage('Pushlish Artifact to Nexus') {
+        stage('Publish Artifact to Nexus') {
             steps {
                 dir('backend') {
                     // Uploading the compiled JAR to Nexus Repository for version control
                     configFileProvider([configFile(fileId: 'nexus-settings', variable: 'MAVEN_SETTINGS')]) {
-                        sh 'mvn -s $MAVEN_SETTINGS clean deploy '
+                        sh 'mvn -s $MAVEN_SETTINGS clean deploy'
                     }
                 }
             }
@@ -192,13 +187,18 @@ pipeline {
                     }
                 }
             }
+            post {
+                always {
+                    dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+                }
+            }
         }
         stage('Docker Build') {
             steps {
                 script {
                     // Building and tagging images for both Frontend and Backend
-                    sh "docker build -t ${FRONTEND_IMAGE_NAME}:${IMAGE_TAG}  ./frontend"
-                    sh "docker build -t ${BACKEND_IMAGE_NAME}:${IMAGE_TAG}  ./backend"
+                    sh "docker build -t ${DOCKER_REGISTRY}/${FRONTEND_IMAGE_NAME}:${IMAGE_TAG} ./frontend"
+                    sh "docker build -t ${DOCKER_REGISTRY}/${BACKEND_IMAGE_NAME}:${IMAGE_TAG} ./backend"
                 }
             }
         }
@@ -208,7 +208,34 @@ pipeline {
                     // Scanning Docker images for security vulnerabilities and best practice violations
                     sh "dockle -f json -o dockle-frontend.json --exit-code 0 ${DOCKER_REGISTRY}/${FRONTEND_IMAGE_NAME}:${IMAGE_TAG} || true"
                     sh "dockle -f json -o dockle-backend.json --exit-code 0 ${DOCKER_REGISTRY}/${BACKEND_IMAGE_NAME}:${IMAGE_TAG} || true"
+                }
+            }
+            post {
+                always {
+                    // Archive artifacts for download
                     archiveArtifacts artifacts: 'dockle-*.json', allowEmptyArchive: true
+                    
+                    // Publish HTML reports on dashboard
+                    script {
+                        // Convert JSON to readable format if needed, or just archive
+                        sh '''
+                            if [ -f dockle-frontend.json ]; then
+                                echo "✅ Dockle Frontend scan completed"
+                            fi
+                            if [ -f dockle-backend.json ]; then
+                                echo "✅ Dockle Backend scan completed"
+                            fi
+                        '''
+                    }
+                    
+                    // Record issues using Warnings Next Gen Plugin
+                    recordIssues(
+                        tools: [
+                            checkStyle(pattern: 'dockle-frontend.json', id: 'dockle-frontend', name: '🐳 Dockle Frontend Scan'),
+                            checkStyle(pattern: 'dockle-backend.json', id: 'dockle-backend', name: '🐳 Dockle Backend Scan')
+                        ],
+                        qualityGates: [[threshold: 1, type: 'TOTAL', unstable: false]]
+                    )
                 }
             }
         }
@@ -224,12 +251,10 @@ pipeline {
                 }
             }
         }
-
-
-        stage(' Wait for ArgoCD Sync & Retrieve Application URL') {
+        stage('Wait for ArgoCD Sync & Retrieve Application URL') {
             steps {
                 script {
-                    withKubeConfig(caCertificate: '', clusterName: 'expdevops-cluster', credentialsId: 'kube-cred', namespace: 'threetierapp', serverUrl: 'https://60CE5186F6A0A4A653F5EF077EB5B74C.gr7.ap-south-1.eks.amazonaws.com') {
+                    withKubeConfig(caCertificate: '', clusterName: 'expdevops-cluster', credentialsId: 'kube-cred', namespace: 'threetierapp', serverUrl: 'https://7EE07C9D9C0C7B52992514E70379915F.yl4.ap-south-1.eks.amazonaws.com') {
                         // Polling Kubernetes to retrieve the ALB Hostname for DAST testing
                         timeout(time: 10, unit: 'MINUTES') {
                             waitUntil {
@@ -249,50 +274,115 @@ pipeline {
                 }
             }
         }
-
         stage('OWASP ZAP Security Scan') {
-            when { expression { return env.K8S_URL != null } }
+            when {
+                expression { return env.K8S_URL != null }
+            }
             steps {
                 script {
-                    // Dynamic Application Security Testing (DAST) on the live application URL
                     def targetUrl = "http://${env.K8S_URL}"
+                    echo "🔍 Starting OWASP ZAP DAST scan on: ${targetUrl}"
+                    
                     sh """
                         docker pull ghcr.io/zaproxy/zaproxy:stable || true
                         docker run --rm -v \$(pwd):/zap/wrk/:rw -t ghcr.io/zaproxy/zaproxy:stable \
-                            zap-baseline.py -t ${targetUrl} -r zap-report.html -I || echo "ZAP scan finished"
+                            zap-baseline.py -t ${targetUrl} -r zap-report.html -J zap-report.json -I || echo "ZAP scan completed"
                     """
-                    archiveArtifacts artifacts: 'zap-report.html', allowEmptyArchive: true
+                    
+                    // Verify reports exist
+                    sh """
+                        if [ -f zap-report.html ]; then
+                            echo "✅ ZAP HTML report generated successfully"
+                            ls -lh zap-report.html
+                        else
+                            echo "⚠️ ZAP HTML report not found!"
+                        fi
+                        
+                        if [ -f zap-report.json ]; then
+                            echo "✅ ZAP JSON report generated successfully"
+                            ls -lh zap-report.json
+                        else
+                            echo "⚠️ ZAP JSON report not found!"
+                        fi
+                    """
+                }
+            }
+            post {
+                always {
+                    // Archive both HTML and JSON reports for download (just like Dockle)
+                    archiveArtifacts artifacts: 'zap-report.*', allowEmptyArchive: true
+                    
+                    // Publish HTML report on Jenkins dashboard
+                    publishHTML([
+                        allowMissing: true,
+                        alwaysLinkToLastBuild: true,
+                        keepAll: true,
+                        reportDir: '.',
+                        reportFiles: 'zap-report.html',
+                        reportName: '🔐 OWASP ZAP Security Report',
+                        reportTitles: 'DAST Security Scan Results'
+                    ])
+                    
+                    // Optional: If you want to integrate with Warnings Next Gen Plugin
+                    // This will show ZAP findings in the same style as Dockle
+                    script {
+                        if (fileExists('zap-report.json')) {
+                            recordIssues(
+                                tools: [
+                                    checkStyle(pattern: 'zap-report.json', id: 'zap-dast', name: '🔐 OWASP ZAP DAST')
+                                ],
+                                qualityGates: [[threshold: 1, type: 'TOTAL', unstable: false]]
+                            )
+                        }
+                    }
                 }
             }
         }
     }
-        post {
-            always {
+    post {
+        always {
+            script {
                 // Cleanup local images to save disk space on the Jenkins agent
                 sh "docker rmi ${DOCKER_REGISTRY}/${FRONTEND_IMAGE_NAME}:${IMAGE_TAG} || true"
                 sh "docker rmi ${DOCKER_REGISTRY}/${BACKEND_IMAGE_NAME}:${IMAGE_TAG} || true"
+                
+                // Publish consolidated security reports on dashboard
+                echo "📊 Publishing all security reports to Jenkins Dashboard..."
+                
+                // Snyk Frontend Report
+                publishHTML([
+                    allowMissing: true,
+                    alwaysLinkToLastBuild: true,
+                    keepAll: true,
+                    reportDir: 'frontend',
+                    reportFiles: 'snyk-frontend.html',
+                    reportName: '📦 Snyk Frontend SCA Report',
+                    reportTitles: 'Frontend Dependencies Scan'
+                ])
+                
+                // Snyk Backend Report
+                publishHTML([
+                    allowMissing: true,
+                    alwaysLinkToLastBuild: true,
+                    keepAll: true,
+                    reportDir: 'backend',
+                    reportFiles: 'snyk-backend.html',
+                    reportName: '📦 Snyk Backend SCA Report',
+                    reportTitles: 'Backend Dependencies Scan'
+                ])
+                
+                echo "✅ Pipeline completed - All security reports available in dashboard"
             }
-            success {
-                emailext (
-                    subject: "✅ Build Success: ${currentBuild.fullDisplayName}",
-                    body: """
-                    <h2>Build Successful!</h2>
-                    <p>Build Number: ${env.BUILD_NUMBER}</p>
-                    <p>App Images: ${DOCKER_REGISTRY}/${FRONTEND_IMAGE_NAME}:${IMAGE_TAG}</p>
-                    <p>Check the artifacts section for Scan Reports (Snyk, Dockle, TruffleHog).</p>
-                    <p>Console Log: ${env.BUILD_URL}console</p>
-                """,
-                    to: '17rahuljoshi@gmail.com, 
-                    attachmentsPattern: '**/*.json,**/*.html' 
-                )
-            }
-            failure {
-                emailext (
-                    subject: "❌ Build Failed: ${currentBuild.fullDisplayName}",
-                    body: "Build failed at stage: ${currentBuild.currentResult}. Check logs here: ${env.BUILD_URL}console",
-                    to: '17rahuljoshi@gmail.com'
-                )
-            }
+        }
+        success {
+            echo "🎉 Build #${env.BUILD_NUMBER} completed successfully!"
+            echo "🐳 Frontend Image: ${DOCKER_REGISTRY}/${FRONTEND_IMAGE_NAME}:${IMAGE_TAG}"
+            echo "🐳 Backend Image: ${DOCKER_REGISTRY}/${BACKEND_IMAGE_NAME}:${IMAGE_TAG}"
+            echo "🌐 Application URL: http://${env.K8S_URL}"
+        }
+        failure {
+            echo "❌ Build #${env.BUILD_NUMBER} failed at stage: ${currentBuild.currentResult}"
+            echo "📋 Check console logs: ${env.BUILD_URL}console"
         }
     }
 }
