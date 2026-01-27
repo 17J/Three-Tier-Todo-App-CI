@@ -184,7 +184,7 @@ Cluster Configuration:
   VPC: Custom VPC with public/private subnets
 ```
 
-**📌 Important:** Follow the [EKS Setup Guide](#eks-cluster-setup) below to create your cluster.
+**📌 Important:** Follow the [EKS Setup Guide](https://github.com/17J/Terraform-AWS-EKS) below to create your cluster.
 
 #### ALB Ingress Controller
 
@@ -196,8 +196,6 @@ Requirements:
   - Namespace: kube-system
 ```
 
-**📌 Important:** ALB Controller must be installed. See [ALB Installation](#alb-controller-installation) section.
-
 #### ArgoCD Setup
 
 ```yaml
@@ -206,8 +204,6 @@ Requirements:
   - ArgoCD CLI configured
   - Git repository access configured
 ```
-
-**📌 Important:** Follow [ArgoCD Installation](#argocd-installation) guide below.
 
 ### 2. Jenkins Server
 
